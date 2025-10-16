@@ -1,0 +1,4 @@
+# Repositorio usa la stdlib (asyncio) para el MVP.
+# Añade paquetes aquí si decides usar Kafka o testing:
+# aiokafka==0.8.0
+# pytest==7.4.0
