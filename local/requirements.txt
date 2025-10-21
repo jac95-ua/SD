@@ -1,0 +1,7 @@
+# Dependencias para la versión LOCAL (TCP)
+# Solo usa la biblioteca estándar de Python
+# No requiere instalaciones adicionales para funcionamiento básico
+
+# Opcional para desarrollo y testing:
+pytest==7.4.0
+pytest-asyncio==0.21.1

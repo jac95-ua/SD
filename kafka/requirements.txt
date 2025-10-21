@@ -1,0 +1,8 @@
+# Dependencias para la versión KAFKA (Distribuida)
+aiokafka==0.8.0
+kafka-python==2.0.2
+pyyaml==6.0.1
+
+# Para desarrollo y testing:
+pytest==7.4.0
+pytest-asyncio==0.21.1

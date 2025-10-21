@@ -1,0 +1,94 @@
+# Configuración para el cluster de Kafka distribuido en 3 ordenadores
+# Adapta las IPs según tus ordenadores
+
+kafka:
+  # Lista de brokers Kafka (ajusta las IPs según tu red)
+  bootstrap_servers:
+    - "192.168.1.100:9092"  # Ordenador 1
+    - "192.168.1.101:9092"  # Ordenador 2  
+    - "192.168.1.102:9092"  # Ordenador 3
+  
+  # Configuración de topics
+  topics:
+    # Topic para registros de CPs
+    cp_register: "cp-register"
+    
+    # Topic para respuestas de registro
+    cp_register_ack: "cp-register-ack"
+    
+    # Topic para requests de autenticación de drivers
+    auth_request: "auth-request"
+    
+    # Topic para respuestas de autenticación
+    auth_response: "auth-response"
+    
+    # Topic para comandos del central a CPs
+    cp_commands: "cp-commands"
+    
+    # Topic para telemetría de CPs
+    telemetry: "telemetry"
+    
+    # Topic para health checks
+    health: "health"
+
+# Configuración por rol
+roles:
+  central:
+    # El central consume de estos topics
+    consumer_topics:
+      - "cp-register"
+      - "auth-request" 
+      - "telemetry"
+      - "health"
+    
+    # El central produce a estos topics
+    producer_topics:
+      - "cp-register-ack"
+      - "auth-response"
+      - "cp-commands"
+    
+    consumer_group: "central-group"
+  
+  cp_engine:
+    # Los CPs consumen de estos topics
+    consumer_topics:
+      - "cp-register-ack"
+      - "cp-commands"
+    
+    # Los CPs producen a estos topics  
+    producer_topics:
+      - "cp-register"
+      - "telemetry"
+      - "health"
+    
+    # Cada CP tiene su propio consumer group
+    consumer_group_template: "cp-{cp_id}-group"
+  
+  driver:
+    # Los drivers consumen de estos topics
+    consumer_topics:
+      - "auth-response"
+    
+    # Los drivers producen a estos topics
+    producer_topics:
+      - "auth-request"
+    
+    # Cada driver tiene su propio consumer group
+    consumer_group_template: "driver-{driver_id}-group"
+
+# Configuración de red por ordenador
+machines:
+  machine1:
+    ip: "192.168.1.100"
+    kafka_port: 9092
+    roles: ["central"]  # Este ordenador ejecuta el central
+    
+  machine2:
+    ip: "192.168.1.101" 
+    kafka_port: 9092
+    roles: ["cp_engine"]  # Este ordenador ejecuta CPs
+    
+  machine3:
+    ip: "192.168.1.102"
+    kafka_port: 9092
+    roles: ["driver", "cp_engine"]  # Este ordenador ejecuta drivers y CPs
