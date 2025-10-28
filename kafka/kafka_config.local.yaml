@@ -1,0 +1,43 @@
+# Local profile for testing with docker-compose (localhost)
+kafka:
+  bootstrap_servers:
+    - "localhost:9092"
+
+  topics:
+    cp_register: "cp-register"
+    cp_register_ack: "cp-register-ack"
+    auth_request: "auth-request"
+    auth_response: "auth-response"
+    cp_commands: "cp-commands"
+    telemetry: "telemetry"
+    health: "health"
+
+roles:
+  central:
+    consumer_topics:
+      - "cp-register"
+      - "auth-request"
+      - "telemetry"
+      - "health"
+    producer_topics:
+      - "cp-register-ack"
+      - "auth-response"
+      - "cp-commands"
+    consumer_group: "central-group"
+
+  cp_engine:
+    consumer_topics:
+      - "cp-register-ack"
+      - "cp-commands"
+    producer_topics:
+      - "cp-register"
+      - "telemetry"
+      - "health"
+    consumer_group_template: "cp-{cp_id}-group"
+
+  driver:
+    consumer_topics:
+      - "auth-response"
+    producer_topics:
+      - "auth-request"
+    consumer_group_template: "driver-{driver_id}-group"

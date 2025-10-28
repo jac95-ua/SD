@@ -7,6 +7,9 @@ import argparse
 import asyncio
 import signal
 from typing import Dict, Any
+import sqlite3
+import time
+from pathlib import Path
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from kafka_utils import (
     load_config, get_consumer_config, get_producer_config,
@@ -18,10 +21,15 @@ class KafkaCentral:
     def __init__(self, config_path: str = "kafka_config.yaml"):
         self.config = load_config(config_path)
         self.topics_map = get_topics(self.config)
-        
-        # Estado del sistema (igual que antes)
+        # Estado del sistema (cache en memoria)
         self.cps: Dict[str, Dict] = {}
-        
+        # Active sessions mapping cp_id -> session_id
+        self.active_sessions: Dict[str, int] = {}
+        # DB
+        self.db_path = Path(self.config.get('db_path', 'ev_charging.db'))
+        self.conn = None
+        self._init_db()
+
         # Kafka components
         self.consumer = None
         self.producer = None
@@ -50,6 +58,114 @@ class KafkaCentral:
         print(f"Bootstrap servers: {consumer_config['bootstrap_servers']}")
         
         self.running = True
+
+    def _init_db(self):
+        """Inicializa la base de datos SQLite y crea tablas si no existen."""
+        db_file = str(self.db_path)
+        self.conn = sqlite3.connect(db_file, check_same_thread=False)
+        cur = self.conn.cursor()
+        # Crear tablas: cps, drivers, sessions, telemetry
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cps (
+                id TEXT PRIMARY KEY,
+                location TEXT,
+                price_kwh REAL,
+                state TEXT,
+                last_seen REAL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS drivers (
+                id TEXT PRIMARY KEY,
+                name TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cp_id TEXT,
+                driver_id TEXT,
+                start_ts REAL,
+                end_ts REAL,
+                last_ts REAL,
+                energy_kwh REAL DEFAULT 0.0,
+                amount REAL DEFAULT 0.0,
+                status TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER,
+                ts REAL,
+                kw REAL,
+                amount REAL
+            )
+            """
+        )
+        self.conn.commit()
+
+    def _upsert_cp_db(self, cp_id: str, payload: Dict[str, Any]):
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO cps(id, location, price_kwh, state, last_seen) VALUES (?, ?, ?, ?, ?)"
+            "ON CONFLICT(id) DO UPDATE SET location=excluded.location, price_kwh=excluded.price_kwh, state=excluded.state, last_seen=excluded.last_seen",
+            (cp_id, payload.get('location'), payload.get('price_kwh'), 'ACTIVADO', time.time()),
+        )
+        self.conn.commit()
+
+    def _create_session_db(self, cp_id: str, driver_id: str) -> int:
+        cur = self.conn.cursor()
+        start_ts = time.time()
+        cur.execute(
+            "INSERT INTO sessions(cp_id, driver_id, start_ts, last_ts, status) VALUES (?, ?, ?, ?, ?)",
+            (cp_id, driver_id, start_ts, None, 'active')
+        )
+        session_id = cur.lastrowid
+        self.conn.commit()
+        return session_id
+
+    def _add_telemetry_db(self, cp_id: str, payload: Dict[str, Any]):
+        # Find active session for cp
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, last_ts FROM sessions WHERE cp_id=? AND status='active' ORDER BY start_ts DESC LIMIT 1", (cp_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+        session_id, last_ts = row[0], row[1]
+        ts = payload.get('timestamp', time.time())
+        kw = float(payload.get('kw', 0.0))
+        # compute delta energy if last_ts available
+        if last_ts:
+            delta_h = max(0.0, float(ts) - float(last_ts)) / 3600.0
+            energy = kw * delta_h
+            # read price
+            cur.execute("SELECT price_kwh FROM cps WHERE id=?", (cp_id,))
+            pr = cur.fetchone()
+            price = float(pr[0]) if pr and pr[0] is not None else 0.0
+            amount = energy * price
+            # update session
+            cur.execute("UPDATE sessions SET energy_kwh = energy_kwh + ?, amount = amount + ? WHERE id=?", (energy, amount, session_id))
+        # insert telemetry entry
+        cur.execute("INSERT INTO telemetry(session_id, ts, kw, amount) VALUES (?, ?, ?, ?)", (session_id, ts, kw, 0.0))
+        # update last_ts
+        cur.execute("UPDATE sessions SET last_ts = ? WHERE id=?", (ts, session_id))
+        # update cps last_seen
+        cur.execute("UPDATE cps SET last_seen = ? WHERE id=?", (time.time(), cp_id))
+        self.conn.commit()
+
+    def _finalize_session_db(self, session_id: int):
+        cur = self.conn.cursor()
+        end_ts = time.time()
+        cur.execute("UPDATE sessions SET end_ts = ?, status = 'finished' WHERE id=? AND status='active'", (end_ts, session_id))
+        self.conn.commit()
 
     async def stop(self):
         """Detiene los componentes de Kafka."""
@@ -113,6 +229,11 @@ class KafkaCentral:
             'state': 'ACTIVADO',
             'last_seen': asyncio.get_event_loop().time()
         }
+        # Persistir en DB
+        try:
+            self._upsert_cp_db(cp_id, payload)
+        except Exception as e:
+            print(f'Error almacenando CP en DB: {e}')
         
         # Enviar ACK via Kafka
         response = make_msg('REGISTER_ACK', 'central', cp_id, {'status': 'OK'})
@@ -132,6 +253,13 @@ class KafkaCentral:
             # Notificar al CP vía Kafka
             start_charge_msg = make_msg('START_CHARGE', 'central', cp_id, {'driver_id': driver_id})
             await self.send_message(self.topics_map['cp_commands'], start_charge_msg)
+            # Crear sesión en DB
+            try:
+                session_id = self._create_session_db(cp_id, driver_id)
+                self.active_sessions[cp_id] = session_id
+                print(f'Sesión creada {session_id} para CP {cp_id} / driver {driver_id}')
+            except Exception as e:
+                print(f'Error creando sesión en DB: {e}')
 
         # Responder al driver
         response = make_msg('AUTH_RESPONSE', 'central', driver_id, {
@@ -145,8 +273,12 @@ class KafkaCentral:
         # Actualizar estado (lógica original)
         self.cps.setdefault(cp_id, {}).setdefault('meta', {})['last_telemetry'] = payload
         self.cps[cp_id]['last_seen'] = asyncio.get_event_loop().time()
-        
         print(f"TELEMETRY {cp_id}: {payload}")
+        # Guardar telemetría en DB y acumular en sesión activa si existe
+        try:
+            self._add_telemetry_db(cp_id, payload)
+        except Exception as e:
+            print(f'Error almacenando telemetría en DB: {e}')
 
     async def handle_health(self, entity_id: str, payload: Dict[str, Any]):
         """Maneja health checks."""
@@ -156,6 +288,13 @@ class KafkaCentral:
         if status == 'KO' and entity_id in self.cps:
             # Marcar CP como averiado
             self.cps[entity_id]['state'] = 'AVERIADO'
+            # Persistir estado en DB
+            try:
+                cur = self.conn.cursor()
+                cur.execute("UPDATE cps SET state = ? WHERE id = ?", ('AVERIADO', entity_id))
+                self.conn.commit()
+            except Exception as e:
+                print(f'Error actualizando estado CP en DB: {e}')
 
     async def send_message(self, topic: str, message: Dict[str, Any]):
         """Envía un mensaje a un topic de Kafka."""
