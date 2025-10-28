@@ -7,7 +7,8 @@ services:
     ports:
       - "2181:2181"
     healthcheck:
-      test: ["CMD", "echo", "ruok", "|", "nc", "127.0.0.1", "2181", "||", "exit", "1"]
+      # Use CMD-SHELL so we can run a pipeline; previous array form split the shell tokens
+      test: ["CMD-SHELL", "echo ruok | nc 127.0.0.1 2181 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
