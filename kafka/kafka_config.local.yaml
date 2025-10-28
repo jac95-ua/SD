@@ -1,7 +1,7 @@
-# Local profile for testing with docker-compose (localhost)
+# Local profile for testing with docker-compose (lab PC as broker)
 kafka:
   bootstrap_servers:
-    - "localhost:9092"
+    - "172.21.243.125:9092"
 
   topics:
     cp_register: "cp-register"
