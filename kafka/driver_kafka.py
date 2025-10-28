@@ -133,6 +133,11 @@ class KafkaDriver:
                 else:
                     self.authorized = False
                     print(f'❌ Autorización DENEGADA para CP {cp_id}')
+                
+            elif tipo == 'SESSION_FINISHED' and src == 'central':
+                # Ticket final recibido
+                ticket = payload
+                print(f"🎫 Ticket recibido para sesión {ticket.get('session_id')}: energía={ticket.get('energy_kwh')} kWh, importe={ticket.get('amount')}")
                     
             else:
                 print(f'Mensaje no reconocido para driver: {msg}')

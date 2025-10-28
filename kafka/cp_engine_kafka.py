@@ -191,9 +191,19 @@ class KafkaCPEngine:
                     await self.send_health_check()
                 else:
                     # Toggle suministro
+                    # Toggle suministro
+                    prev = self.suministrando
                     self.suministrando = not self.suministrando
                     state = "suministrando" if self.suministrando else "disponible"
                     print(f'CP {self.cp_id} estado: {state}')
+                    # If we just stopped supplying, notify central with STOP_CHARGE
+                    if prev and not self.suministrando:
+                        stop_msg = make_msg('STOP_CHARGE', 'cp', self.cp_id, {
+                            'timestamp': asyncio.get_event_loop().time(),
+                            'reason': 'user_stopped'
+                        })
+                        # send STOP_CHARGE on telemetry topic (central listens to telemetry)
+                        await self.send_message(self.topics_map['telemetry'], stop_msg)
                     
             except EOFError:
                 # No hay entrada disponible (modo batch)

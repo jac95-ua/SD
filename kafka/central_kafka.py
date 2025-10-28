@@ -212,6 +212,9 @@ class KafkaCentral:
             elif tipo == 'TELEMETRY' and src == 'cp':
                 await self.handle_telemetry(id_, payload)
                 
+            elif tipo == 'STOP_CHARGE' and src == 'cp':
+                await self.handle_stop_charge(id_, payload)
+                
             elif tipo == 'HEALTH' and src in ('monitor', 'cp'):
                 await self.handle_health(id_, payload)
                 
@@ -295,6 +298,52 @@ class KafkaCentral:
                 self.conn.commit()
             except Exception as e:
                 print(f'Error actualizando estado CP en DB: {e}')
+
+    async def handle_stop_charge(self, cp_id: str, payload: Dict[str, Any]):
+        """Maneja la notificación de fin de suministro desde un CP."""
+        print(f'STOP_CHARGE recibido desde {cp_id}: {payload}')
+
+        # Buscar sesión activa
+        session_id = self.active_sessions.get(cp_id)
+        if not session_id:
+            print(f'No hay sesión activa para CP {cp_id}')
+            return
+
+        try:
+            # Finalizar sesión en DB
+            self._finalize_session_db(session_id)
+
+            # Leer datos finales de la sesión
+            cur = self.conn.cursor()
+            cur.execute("SELECT cp_id, driver_id, start_ts, end_ts, energy_kwh, amount FROM sessions WHERE id=?", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                print(f'No se encontró la sesión {session_id} en la BD')
+            else:
+                cp_id_db, driver_id, start_ts, end_ts, energy_kwh, amount = row
+                ticket = {
+                    'session_id': session_id,
+                    'cp_id': cp_id_db,
+                    'driver_id': driver_id,
+                    'start_ts': start_ts,
+                    'end_ts': end_ts,
+                    'energy_kwh': energy_kwh,
+                    'amount': amount,
+                    'reason': payload.get('reason') if payload else None
+                }
+                # Enviar ticket al driver en topic session_finished
+                try:
+                    await self.send_message(self.topics_map['session_finished'], make_msg('SESSION_FINISHED', 'central', driver_id, ticket))
+                    print(f'Ticket enviado al driver {driver_id} para sesión {session_id}')
+                except Exception as e:
+                    print(f'Error enviando ticket al driver {driver_id}: {e}')
+
+        except Exception as e:
+            print(f'Error finalizando sesión {session_id}: {e}')
+        finally:
+            # Limpiar sesión activa en memoria
+            if cp_id in self.active_sessions:
+                del self.active_sessions[cp_id]
 
     async def send_message(self, topic: str, message: Dict[str, Any]):
         """Envía un mensaje a un topic de Kafka."""
