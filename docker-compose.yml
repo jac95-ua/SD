@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    # No necesitamos network_mode: "host" ni exponer puertos
+    # Kafka lo encontrará por su nombre de servicio "zookeeper"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    depends_on:
+      - zookeeper
+    # Exponemos el puerto 9092 de Kafka al puerto 9092 de tu VM
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      # Ahora Kafka SÍ puede encontrar a Zookeeper por su nombre
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      
+      # 1. Listener interno: Kafka escucha en el puerto 9092 dentro de su red Docker
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      
+      # 2. Listener anunciado: Kafka le dice a tus scripts (fuera de Docker)
+      #    que se conecten a localhost:9092 (el puerto que expusimos)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1

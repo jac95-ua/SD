@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/javier/Documentos/SD/EV_Driver/driver.py", line 57, in <module>
+    main()
+  File "/home/javier/Documentos/SD/EV_Driver/driver.py", line 38, in main
+    producer.send(REQUESTS_TOPIC, msg)
+  File "/home/javier/Documentos/SD/.venv/lib/python3.12/site-packages/kafka/producer/kafka.py", line 840, in send
+    self._wait_on_metadata(topic, timer.timeout_ms)
+  File "/home/javier/Documentos/SD/.venv/lib/python3.12/site-packages/kafka/producer/kafka.py", line 964, in _wait_on_metadata
+    raise Errors.KafkaTimeoutError(
+kafka.errors.KafkaTimeoutError: KafkaTimeoutError: Failed to update metadata after 60.0 secs.

@@ -1,0 +1,47 @@
+sudo docker-compose up -d
+
+
+python3 -m venv .venv #crea entonro virtual
+source .venv/bin/activate #activa entorno
+pip install -r requirements.txt #instalacion librerias
+
+
+#abres nuevo terminal
+# en cada terminal nuevo hay que volver a activar entorno
+python3 -m EV_Central.main 9999 localhost:9092 ev_central.dbpython3 -m EV_Central.main 9999 localhost:9092 ev_central.db
+
+#otro terminal
+#entorno
+python3 EV_Charging_Point/engine.py localhost:9092 localhost:8001 CP_1
+
+#otro
+#entorno
+python3 EV_Charging_Point/monitor.py localhost:8001 localhost:9999 CP_1
+
+#ultimo terminal
+python3 EV_Driver/driver.py localhost:9092 driver_007
+
+al arrancar monitor volver a central para ver como imprime estado
+una vez arrancado driver deberia de empezar a suministrar y al final hacer un ticket que se vera desde driver
+en engine si haces f + enter se hace prueba de fallo de engine
+si en monitor haces ctrl + c en central imprime:
+[DISCONNECT] Monitor for CP_1 has disconnected.
+[STATE] CP_1 -> Desconectado
+
+Se puede desconectar central y volver a encender y los Engines se reconectarian.
+desde engine haciendo status vemos todos los CPs
+se puede hacer parar/reanudar CP_1 
+
+La anterior forma de conectar un Driver leia de requests y se conectaba, ahora con
+
+python3 EV_Driver/driver.py localhost:9092 driver_007 CP_2
+
+Te conectas a otra, para agregar otro engine hay que 
+
+1. arrancar engine (hay que cambiar ID(cp_w) y el puerto en vez de 8001 poner 8002/3/4/5...)
+     python3 EV_Charging_Point/engine.py localhost:9092 localhost:8002 CP_2
+
+2. arrancar monitor para CP2
+    python3 EV_Charging_Point/monitor.py localhost:8001 localhost:9999 CP_1
+
+
