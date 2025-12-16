@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 EV_Central: socket server for monitors and Kafka consumer/producer
+Usa el protocolo <STX><DATA><ETX><LRC>.
 
 Usage: EV_Central <PORT_SOCKETS> <KAFKA_BROKER> [DB_PATH]
-
-This is a minimal implementation to bootstrap the project specified in the README.
 """
 import sys
 import threading
@@ -13,74 +12,137 @@ import socket
 import json
 import time
 from kafka import KafkaProducer, KafkaConsumer
-from . import db
+import protocol # <-- IMPORTAMOS NUESTRO PROTOCOLO
+from EV_Central import db # <-- Usamos la importación de paquete (para -m)
 
 REQUESTS_TOPIC = 'requests_topic'
 TELEMETRY_TOPIC = 'telemetry_topic'
 CONTROL_TOPIC = 'control_topic'
 
-class MonitorHandler(socketserver.StreamRequestHandler):
+class MonitorHandler(socketserver.BaseRequestHandler): # <-- CAMBIADO a BaseRequestHandler
+
+    # --- NUEVA FUNCIÓN ---
+    def process_message(self, msg_dict):
+        """
+        Procesa un diccionario de mensaje ya validado y parseado.
+        Toda la lógica de 'register', 'averia', 'ok' se mueve aquí.
+        """
+        try:
+            cp_id_from_msg = msg_dict.get('id')
+            if cp_id_from_msg:
+                self.cp_id = cp_id_from_msg
+
+            typ = msg_dict.get('type')
+
+            if typ == 'register':
+                location = msg_dict.get('location', 'unknown')
+                price = msg_dict.get('price', 0.0)
+                
+                db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Activado')
+                self.server.register_monitor(self.cp_id, self.request, location, price)
+                
+                print(f"[REGISTER] CP {self.cp_id} @ {location}")
+            
+            elif typ == 'averia':
+                cp = self.server.cps.get(self.cp_id)
+                if cp and cp.get('state') != 'Averiado':
+                    print(f"[ALERT] AVERÍA from {self.cp_id}")
+                    self.server.handle_averia(self.cp_id)
+            
+            elif typ == 'ok':
+                cp = self.server.cps.get(self.cp_id)
+                if cp:
+                    current_state = cp.get('state')
+                    
+                    # Si el estado era de error (Averiado o Desconectado)
+                    if current_state == 'Averiado' or current_state == 'Desconectado':
+                        
+                        # 1. Marcar como Activado
+                        self.server.set_state(self.cp_id, 'Activado')
+                        
+                        # --- ¡LÓGICA AÑADIDA! ---
+                        # 2. Enviar comando 'reanudar' al Engine para que limpie su estado interno.
+                        print(f"[RECOVERY] El monitor {self.cp_id} reporta OK. Enviando 'reanudar' al Engine.")
+                        try:
+                            # Usamos el producer del server, que adjuntamos en main()
+                            if hasattr(self.server, 'producer'):
+                                self.server.producer.send(CONTROL_TOPIC, {'type': 'reanudar', 'cp_id': self.cp_id})
+                        except Exception as e:
+                            print(f"[ERROR] Fallo al enviar 'reanudar' para {self.cp_id}: {e}")
+
+        except Exception as e:
+            print(f"[PROCESS] Error procesando mensaje: {e}")
+
+    # --- MÉTODO 'handle' TOTALMENTE REESCRITO ---
     def handle(self):
+        """
+        Lee el socket byte por byte, busca tramas <STX>...<ETX><LRC>
+        y las valida antes de procesarlas.
+        """
         self.cp_id = None
         addr = self.client_address[0]
         print(f"[SOCKET] Connection from {addr}")
+
+        state = 'WAIT_STX'
+        message_buffer = b''
         
         try:
-            for line in self.rfile:
-                try:
-                    msg = json.loads(line.decode('utf-8').strip())
-                except Exception:
-                    continue
+            # Bucle de lectura byte a byte
+            while True:
+                byte = self.request.recv(1)
+                if not byte:
+                    # Cliente desconectado
+                    break
 
-                cp_id_from_msg = msg.get('id')
-                if cp_id_from_msg:
-                    self.cp_id = cp_id_from_msg
+                # ---- Máquina de estados del protocolo ----
+                if state == 'WAIT_STX':
+                    if byte == protocol.STX:
+                        state = 'IN_MESSAGE'
+                        message_buffer = b'' # Limpiamos buffer
 
-                typ = msg.get('type')
+                elif state == 'IN_MESSAGE':
+                    if byte == protocol.ETX:
+                        state = 'WAIT_LRC'
+                    else:
+                        message_buffer += byte # Acumulamos el JSON
 
-                if typ == 'register':
-                    location = msg.get('location', 'unknown')
-                    price = msg.get('price', 0.0) 
+                elif state == 'WAIT_LRC':
+                    # Este 'byte' es el LRC que nos envió el monitor
+                    received_lrc = byte
                     
-                    db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Activado')
-                    self.server.register_monitor(self.cp_id, self.request, location, price)
-                    
-                    print(f"[REGISTER] CP {self.cp_id} @ {location}")
-                
-                # --- ¡BLOQUE MODIFICADO! ---
-                elif typ == 'averia':
-                    cp = self.server.cps.get(self.cp_id)
-                    # Solo procesar la avería si NO está ya marcado como 'Averiado'
-                    if cp and cp.get('state') != 'Averiado':
-                        print(f"[ALERT] AVERÍA from {self.cp_id}")
+                    # 1. Calcular nuestro propio LRC del mensaje
+                    calculated_lrc = protocol.calculate_lrc(message_buffer)
+
+                    # 2. Validar
+                    if received_lrc == calculated_lrc:
+                        # ¡CHECKSUM VÁLIDO!
                         try:
-                            # handle_averia ya imprime el estado, así que esto es todo.
-                            self.server.handle_averia(self.cp_id)
+                            msg_dict = json.loads(message_buffer.decode('utf-8'))
+                            # Enviamos el dict a procesar
+                            self.process_message(msg_dict)
                         except Exception as e:
-                            print(f"[ERROR] handling averia for {self.cp_id}: {e}")
-                    # Si ya estaba 'Averiado', ignoramos el mensaje y no imprimimos nada.
+                            print(f"[PROTO] Error (JSON): {e}. Trama: {message_buffer}")
+                    else:
+                        # ¡CHECKSUM INVÁLIDO!
+                        print(f"[PROTO] Error (Checksum): Recibido {received_lrc} vs Calculado {calculated_lrc}. Trama: {message_buffer}")
+                    
+                    # 3. Volver al estado inicial y esperar la siguiente trama
+                    state = 'WAIT_STX'
                 
-                elif typ == 'ok':
-                    cp = self.server.cps.get(self.cp_id)
-                    if cp:
-                        current_state = cp.get('state')
-                        
-                        # Solo re-activa si estaba en un estado de error.
-                        if current_state == 'Averiado' or current_state == 'Desconectado':
-                            self.server.set_state(self.cp_id, 'Activado')
-                        
-                        # (Terminal limpia)
-                        # print(f"[STATE] {self.cp_id} -> Activado")
-
-        except Exception as e:
+        except (socket.timeout, ConnectionResetError) as e:
             print(f"[SOCKET] Connection error for {self.cp_id or 'unknown'}: {e}")
+        except Exception as e:
+            print(f"[SOCKET] Unexpected error for {self.cp_id or 'unknown'}: {e}")
         
         finally:
+            # Lógica de desconexión que ya teníamos
             if self.cp_id:
                 print(f"[DISCONNECT] Monitor for {self.cp_id} has disconnected.")
                 self.server.set_state(self.cp_id, 'Desconectado')
             else:
                 print(f"[DISCONNECT] An unknown monitor (never registered) has disconnected.")
+
+
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
@@ -92,8 +154,6 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.active_supplies = {}  # cp_id -> driver_id
         self.last_telemetry = {}  # cp_id -> last telemetry dict
 
-        # Forzar todos los CPs cargados de la BBDD a 'Desconectado' al arrancar.
-        # Solo se pondrán 'Activado' cuando su Monitor se conecte.
         print("[STATE] CPs conocidos en BBDD:")
         if not self.cps:
             print("[STATE] (Ninguno)")
@@ -101,22 +161,29 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
             for cp_id, cp in self.cps.items():
                 print(f"[STATE] - {cp_id} (Estado en BBDD: {cp['state']}) -> Forzando a Desconectado")
                 cp['state'] = 'Desconectado'
-    
 
     def register_monitor(self, cp_id, sock, location, price):
         self.monitors[cp_id] = sock
-        # Ahora usamos los valores recibidos para crear/actualizar el CP en memoria
         self.cps[cp_id] = {'id': cp_id, 'location': location, 'price': price, 'state': 'Activado'}
 
     def set_state(self, cp_id, state):
         cp = self.cps.get(cp_id)
         if cp:
-            cp['state'] = state
-            db.save_cp(self.db_path, cp_id, cp.get('location','unknown'), price=cp.get('price',0.0), state=state)
-            print(f"[STATE] {cp_id} -> {state}")
+            if cp.get('state') != state:
+                cp['state'] = state
+                db.save_cp(self.db_path, cp_id, cp.get('location','unknown'), price=cp.get('price',0.0), state=state)
+                print(f"[STATE] {cp_id} -> {state}")
+                
+                # --- NUEVO: Avisar a Kafka del cambio de estado ---
+                # Esto permite que el Dashboard visual se actualice
+                try:
+                    if hasattr(self, 'producer'):
+                        msg = {'type': 'state_update', 'cp_id': cp_id, 'state': state}
+                        self.producer.send(CONTROL_TOPIC, msg) # Usamos la variable global control_topic
+                except Exception as e:
+                    print(f"[ERROR] No se pudo enviar actualización de estado a Kafka: {e}")
 
     def handle_averia(self, cp_id):
-        # mark as averiado and instruct engine to stop via Kafka if producer attached
         self.set_state(cp_id, 'Averiado')
         try:
             if hasattr(self, 'producer'):
@@ -124,7 +191,7 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                 print(f"[KAFKA] Sent parar for {cp_id}")
         except Exception as e:
             print(f"[ERROR] sending parar for {cp_id}: {e}")
-        # if there was an active supply, produce a ticket aborted with last telemetry if available
+        
         driver = self.active_supplies.get(cp_id)
         if driver:
             telemetry = self.last_telemetry.get(cp_id, {})
@@ -135,7 +202,6 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     print(f"[KAFKA] Sent aborted ticket for {cp_id} -> {driver}")
             except Exception as e:
                 print(f"[ERROR] sending aborted ticket: {e}")
-            # cleanup
             try:
                 del self.active_supplies[cp_id]
             except KeyError:
@@ -151,14 +217,12 @@ def kafka_consume_requests(broker, producer, central):
         driver_id = r.get('driver_id')
         cp = central.cps.get(cp_id)
         if not cp or cp.get('state') != 'Activado':
-            # Deny
             producer.send(CONTROL_TOPIC, {'type': 'denied', 'cp_id': cp_id, 'driver_id': driver_id})
             print(f"[KAFKA] Denied {driver_id} -> {cp_id}")
         else:
-            # Authorize and instruct engine
             producer.send(CONTROL_TOPIC, {'type': 'authorize', 'cp_id': cp_id, 'driver_id': driver_id})
-            # record active supply
             central.active_supplies[cp_id] = driver_id
+            central.set_state(cp_id, 'Suministrando') # Ponemos estado Suministrando
             print(f"[KAFKA] Authorized {driver_id} -> {cp_id}")
 
 def kafka_consume_telemetry(broker, central):
@@ -170,15 +234,13 @@ def kafka_consume_telemetry(broker, central):
         driver_id = t.get('driver_id')
         consumo = t.get('consumo_kwh')
         importe = t.get('importe_eur')
+        
         cp = central.cps.get(cp_id)
-        if cp:
-            cp['state'] = 'Suministrando'
-            # store last telemetry
+        if cp: # Comprobamos que el CP existe
             central.last_telemetry[cp_id] = t
             print(f"[TELEMETRY] {cp_id} driver {driver_id} consumo {consumo} kWh importe {importe}€")
-            # if this telemetry marks final, produce ticket to driver and cleanup active supply
+            
             if t.get('final'):
-                driver = central.active_supplies.get(cp_id)
                 ticket = {'type': 'ticket', 'cp_id': cp_id, 'driver_id': driver_id, 'consumo_kwh': consumo, 'importe_eur': importe, 'final': True}
                 try:
                     if hasattr(central, 'producer'):
@@ -186,16 +248,21 @@ def kafka_consume_telemetry(broker, central):
                         print(f"[KAFKA] Sent final ticket for {cp_id} -> {driver_id}")
                 except Exception as e:
                     print(f"[ERROR] sending final ticket: {e}")
-                # mark cp as activated and cleanup
-                central.set_state(cp_id, 'Activado')
+                
+                # --- ¡LÓGICA CORREGIDA! ---
+                # Al finalizar, solo lo ponemos 'Activado' si no está
+                # ni 'Parado' (por el admin) ni 'Averiado' (por el monitor).
+                current_state = cp.get('state')
+                if current_state != 'Parado' and current_state != 'Averiado':
+                     central.set_state(cp_id, 'Activado')
+                # --- FIN DE LA CORRECCIÓN ---
+
                 try:
                     if cp_id in central.active_supplies:
                         del central.active_supplies[cp_id]
                 except Exception:
                     pass
-
 def admin_console_loop(producer, central):
-    # Añadimos 'status' a la ayuda
     print('Admin console: use "parar <CP_ID>", "reanudar <CP_ID>" or "status"')
     while True:
         try:
@@ -206,7 +273,6 @@ def admin_console_loop(producer, central):
             continue
         parts = line.split()
 
-    
         if parts[0] == 'status':
             print("[STATUS] Estado actual de todos los CPs:")
             if not central.cps:
@@ -214,10 +280,26 @@ def admin_console_loop(producer, central):
             else:
                 # Itera sobre el diccionario de CPs del servidor y muestra sus datos
                 for cp_id, cp_data in central.cps.items():
+                    # Imprime la línea principal del CP
                     print(f"  - {cp_id:<10} | Estado: {cp_data.get('state', 'unknown'):<15} | Ubic: {cp_data.get('location', 'unknown')}")
+                    
+                    # --- ¡MEJORA AÑADIDA AQUÍ! ---
+                    # Si está Suministrando, muestra los detalles en tiempo real
+                    if cp_data.get('state') == 'Suministrando':
+                        driver = central.active_supplies.get(cp_id, '???')
+                        telemetry = central.last_telemetry.get(cp_id)
+                        
+                        if telemetry:
+                            consumo = telemetry.get('consumo_kwh', 0.0)
+                            importe = telemetry.get('importe_eur', 0.0)
+                            # Imprime una sub-línea con la telemetría
+                            print(f"    \t└─ Driver: {driver}, Consumo: {consumo} kWh, Importe: {importe}€")
+                        else:
+                            # Por si acaso la telemetría aún no ha llegado
+                            print(f"    \t└─ Driver: {driver}, (Esperando telemetría...)")
             continue # Volver al input
         
-
+        # --- (El resto de la función 'parar' y 'reanudar' sigue igual) ---
         if parts[0] == 'parar' and len(parts) >= 2:
             cp_id = parts[1]
             central.set_state(cp_id, 'Parado')
@@ -226,7 +308,6 @@ def admin_console_loop(producer, central):
             cp_id = parts[1]
             central.set_state(cp_id, 'Activado')
             producer.send(CONTROL_TOPIC, {'type': 'reanudar', 'cp_id': cp_id})
-
 def main():
     if len(sys.argv) < 3:
         print('Usage: EV_Central <PORT_SOCKETS> <KAFKA_BROKER> [DB_PATH]')
@@ -236,24 +317,27 @@ def main():
     db_path = sys.argv[3] if len(sys.argv) > 3 else 'ev_central.db'
     db.init_db(db_path)
 
-    producer = KafkaProducer(bootstrap_servers=[broker], value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+    try:
+        producer = KafkaProducer(bootstrap_servers=[broker], value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+    except Exception as e:
+        print(f"[CENTRAL] Error fatal: No se pudo conectar a Kafka en {broker}. {e}")
+        sys.exit(1)
 
     server = ThreadedTCPServer(('0.0.0.0', port), MonitorHandler, db_path)
+    server.producer = producer # Adjuntamos el producer al server para que handle_averia lo use
 
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     print(f"[SOCKET] EV_Central listening on 0.0.0.0:{port}")
 
-    # Kafka consumers
     threading.Thread(target=kafka_consume_requests, args=(broker, producer, server), daemon=True).start()
     threading.Thread(target=kafka_consume_telemetry, args=(broker, server), daemon=True).start()
-
-    # Admin console: only open interactive console if stdin is a TTY.
+    
     try:
         if sys.stdin.isatty():
             admin_console_loop(producer, server)
         else:
-            # run headless until interrupted
+            print('No TTY for admin console, running headless.')
             try:
                 while True:
                     time.sleep(1)
@@ -264,8 +348,7 @@ def main():
         print('Shutting down...')
         server.shutdown()
     except OSError as e:
-        # In some detached environments input() raises Bad file descriptor; run headless.
-        print('No TTY for admin console, running headless:', e)
+        print(f'No TTY for admin console, running headless: {e}')
         try:
             while True:
                 time.sleep(1)

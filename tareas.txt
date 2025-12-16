@@ -32,7 +32,7 @@ Por qué falta: Tu EV_Central/main.py, en su __init__, llama a db.load_cps(db_pa
 
     Cómo arreglarlo: Deberías añadir otra opción de teclado al engine.py (ej. pulsar m + Enter) que simule un suministro local (sin autorización de la central) y envíe la telemetría igualmente.
 
-5. (Mejora) Protocolo Socket Recomendado
+5. (Mejora) Protocolo Socket Recomendado      -------------------HECHO------------------
 
     Lo que falta: La práctica recomienda (y la guía de corrección lo valora) usar un protocolo de sockets específico: <STX><DATA><ETX><LRC>.
 

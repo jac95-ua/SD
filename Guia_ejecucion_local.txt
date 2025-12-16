@@ -1,25 +1,31 @@
-sudo docker-compose up -d
+1 . mosificar docker-compose en pc de central : KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://<IP_PC_CENTRAL>:9092
+sudo docker-compose up -d solo en el pc de central
 
+172.21.242.249 -- solo cambia los ultimos tres digitos
 
-python3 -m venv .venv #crea entonro virtual
-source .venv/bin/activate #activa entorno
-pip install -r requirements.txt #instalacion librerias
+rm -rf .venv
+python3 -m venv .venv 
+source .venv/bin/activate
+pip install -r requirements.txt 
+
 
 
 #abres nuevo terminal
 # en cada terminal nuevo hay que volver a activar entorno
-python3 -m EV_Central.main 9999 localhost:9092 ev_central.dbpython3 -m EV_Central.main 9999 localhost:9092 ev_central.db
+python3 -m EV_Central.main 9999 <IP_CENTRAL>:9092 ev_central.db
 
 #otro terminal
 #entorno
-python3 EV_Charging_Point/engine.py localhost:9092 localhost:8001 CP_1
+python3 -m EV_Charging_Point.engine <IP_PC_CENTRAL>:9092 <IP_ESTE_PC>:8001 CP_1
 
 #otro
 #entorno
-python3 EV_Charging_Point/monitor.py localhost:8001 localhost:9999 CP_1
+
+python3 -m EV_Charging_Point.monitor <IP_ESTE_PC>:8001 <IP_CENTRAL>:9999 CP_1
 
 #ultimo terminal
-python3 EV_Driver/driver.py localhost:9092 driver_007
+python3 -m EV_Driver.driver <IP_CENTRAL>:9092 driver_007
+python3 -m EV_Driver.driver <IP_CENTRAL>:9092 driver_007 CP_1
 
 al arrancar monitor volver a central para ver como imprime estado
 una vez arrancado driver deberia de empezar a suministrar y al final hacer un ticket que se vera desde driver

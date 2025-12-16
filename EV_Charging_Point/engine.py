@@ -64,25 +64,26 @@ def simulate_supply(producer, engine_id, driver_id, state):
     
     try:
         # 4. Bucle de simulación
-        # El bucle se detiene si 'stop' o 'failed' se vuelven True MIENTRAS carga
-        while consumo < 5.0 and not state.get('stop') and not state.get('failed'):
-            consumo += 0.5
-            importe += consumo * 0.25 # Asumimos un precio de 0.25
+        # CAMBIO: Eliminado el límite de "consumo < 5.0". 
+        # Ahora solo para si state['stop'] (botón Parar) o state['failed'] (Avería) son True.
+        while not state.get('stop') and not state.get('failed'):
+            consumo += 0.5 # Puedes bajar esto a 0.1 si quieres que vaya más lento visualmente
+            importe = consumo * 0.25 # Recalculamos importe total basado en precio fijo
             
             telemetry_msg = {
                 'cp_id': engine_id, 
                 'driver_id': driver_id, 
-                'consumo_kwh': consumo, 
+                'consumo_kwh': round(consumo, 2), 
                 'importe_eur': round(importe, 2)
             }
             producer.send(TELEMETRY_TOPIC, telemetry_msg)
-            time.sleep(1)
+            time.sleep(1) # Simula el paso del tiempo (1 segundo)
         
         # 5. Enviar mensaje final
         final_msg = {
             'cp_id': engine_id, 
             'driver_id': driver_id, 
-            'consumo_kwh': consumo, 
+            'consumo_kwh': round(consumo, 2), 
             'importe_eur': round(importe, 2), 
             'final': True
         }
@@ -93,6 +94,7 @@ def simulate_supply(producer, engine_id, driver_id, state):
         elif state.get('failed'):
             print(f"[ENGINE] Suministro DETENIDO (Avería) para '{driver_id}' en {engine_id}")
         else:
+            # Este caso teóricamente ya no se daría solo, salvo error, porque el bucle es infinito
             print(f"[ENGINE] Suministro FINALIZADO para '{driver_id}' en {engine_id}")
 
     except Exception as e:
@@ -101,7 +103,7 @@ def simulate_supply(producer, engine_id, driver_id, state):
     finally:
         # 6. Liberar el CP
         state['busy'] = False
-        state['stop'] = False # Limpiamos el flag de 'stop'
+        state['stop'] = False # Limpiamos el flag de 'stop' para la próxima vez
 
 def kafka_control_loop(broker, producer, engine_id, state):
     """
