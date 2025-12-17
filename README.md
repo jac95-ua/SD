@@ -29,48 +29,48 @@ Implementación de la autoridad de registro y autenticación inicial.
 2. Core del Sistema (✅ Funcional)
 Lógica de negocio base de carga y mensajería.
 
-[x] Comunicación Asíncrona: Implementación de Kafka (Topics: requests, telemetry, control).
+    [x] Comunicación Asíncrona: Implementación de Kafka (Topics: requests, telemetry, control).
 
-[x] Protocolo de Mensajería: Definición de trama <STX>JSON<ETX><LRC>.
+    [x] Protocolo de Mensajería: Definición de trama <STX>JSON<ETX><LRC>.
 
-[x] EV_Engine (Simulador):
+    [x] EV_Engine (Simulador):
 
-[x] Simulación de carga (kWh y coste).
+    [x] Simulación de carga (kWh y coste).
 
-[x] Modo Manual (m) e Interactivo.
+    [x] Modo Manual (m) e Interactivo.
 
-[x] Corrección de identidad (Argumentos de arranque CLI).
+    [x] Corrección de identidad (Argumentos de arranque CLI).
 
-[x] EV_Driver: Cliente para solicitar cargas y visualizar progreso.
+    [x] EV_Driver: Cliente para solicitar cargas y visualizar progreso.
 
 3. Seguridad Avanzada y Cifrado (🚧 Pendiente)
 Siguiente paso: Proteger la comunicación con criptografía.
 
-[ ] HTTPS/SSL en Registry: Configurar certificados para que el registro sea sobre HTTPS (actualmente es HTTP).
+    [ ] HTTPS/SSL en Registry: Configurar certificados para que el registro sea sobre HTTPS (actualmente es HTTP).
 
-[ ] Intercambio de Claves (Handshake):
+    [ ] Intercambio de Claves (Handshake):
 
-[ ] Central: Generar una clave simétrica (AES) tras validar el token.
+    [ ] Central: Generar una clave simétrica (AES) tras validar el token.
 
-[ ] Central: Enviar la clave al Monitor de forma segura.
+    [ ] Central: Enviar la clave al Monitor de forma segura.
 
-[ ] Cifrado de Tráfico:
+    [ ] Cifrado de Tráfico:
 
-[ ] Implementar librería cryptography.
+    [ ] Implementar librería cryptography.
 
-[ ] Encriptar payload de mensajes Socket y Kafka con la clave simétrica.
+    [ ] Encriptar payload de mensajes Socket y Kafka con la clave simétrica.
 
-[ ] Central: Descifrar mensajes entrantes.
+    [ ] Central: Descifrar mensajes entrantes.
 
 4. Funcionalidades Externas (🚧 Pendiente)
-[ ] Módulo EV_W (Weather):
+    [ ] Módulo EV_W (Weather):
 
-[ ] Script de consulta a OpenWeatherMap API.
+    [ ] Script de consulta a OpenWeatherMap API.
 
-[ ] Lógica de parada automática por temperatura (< 0ºC).
+    [ ] Lógica de parada automática por temperatura (< 0ºC).
 
-[ ] Front-End (Dashboard):
+    [ ] Front-End (Dashboard):
 
-[ ] Web pública para visualizar estado de los cargadores.
+    [ ] Web pública para visualizar estado de los cargadores.
 
-[ ] API REST en EV_Central para alimentar el Front-end.
+    [ ] API REST en EV_Central para alimentar el Front-end.
