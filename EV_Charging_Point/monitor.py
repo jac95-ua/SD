@@ -13,6 +13,24 @@ import threading
 import protocol 
 import requests
 
+def register_in_registry(cp_id, location):
+    """Contacta con EV_Registry para obtener el token de acceso."""
+    registry_url = "http://localhost:6000/register"
+    print(f"[BOOT] Registrando en {registry_url}...")
+    try:
+        payload = {"id": cp_id, "location": location}
+        response = requests.post(registry_url, json=payload, timeout=5)
+        if response.status_code == 200:
+            token = response.json().get("token")
+            print(f"[BOOT] ✅ Token obtenido: {token}")
+            return token
+        else:
+            print(f"[BOOT] ❌ Error registro: {response.text}")
+            return None
+    except Exception as e:
+        print(f"[BOOT] ❌ Fallo conexión Registry: {e}")
+        return None
+
 def parse_addr(s):
     try:
         host, port = s.split(':')
@@ -72,45 +90,46 @@ def main():
     engine_addr = sys.argv[1]
     central_addr_str = sys.argv[2]
     cp_id = sys.argv[3]
-
     chost, cport = parse_addr(central_addr_str)
-    
-    reg_msg_dict = {'type':'register','id':cp_id,'location':'Calle Falsa 123','price':0.25}
-    
-    # --- CAMBIO IMPORTANTE ---
-    # Envolvemos el mensaje de registro
-    reg_msg_bytes = protocol.wrap_message(reg_msg_dict)
-    if not reg_msg_bytes:
-        print("[MONITOR] Error fatal: No se pudo crear el mensaje de registro.")
-        sys.exit(1)
-    # --- FIN DEL CAMBIO ---
+    location = 'Calle Falsa 123'
 
+    # --- 2. LLAMADA AL REGISTRO (AÑADIR ESTO) ---
+    token = register_in_registry(cp_id, location)
+    if not token:
+        print("[FATAL] Sin token no puedo arrancar. Verifica que EV_Registry corre en puerto 6000.")
+        sys.exit(1)
+    # --------------------------------------------
+    
+    # --- 3. AÑADIR TOKEN AL MENSAJE (MODIFICAR ESTO) ---
+    # Añadimos el campo 'token' al diccionario
+    reg_msg_dict = {
+        'type': 'register', 
+        'id': cp_id, 
+        'location': location, 
+        'price': 0.25,
+        'token': token  # <--- IMPORTANTE: Enviamos la credencial a la Central
+    }
+    
+    reg_msg_bytes = protocol.wrap_message(reg_msg_dict)
+    
     while True:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            print(f"[MONITOR] Intentando conectar con EV_Central en {chost}:{cport}...")
+            print(f"[MONITOR] Conectando a Central {chost}:{cport}...")
             s.connect((chost, cport))
-            print("[MONITOR] ¡Conexión con EV_Central establecida!")
-
-            # Enviamos el mensaje de registro YA ENVUELTO
+            
             s.sendall(reg_msg_bytes)
-            print(f"[MONITOR] Mensaje de registro enviado para {cp_id}.")
+            print(f"[MONITOR] Autenticación enviada (ID + Token).")
 
             t = threading.Thread(target=handle_engine_check, args=(engine_addr, s, cp_id), daemon=True)
             t.start()
             t.join()
-            
-            print("[MONITOR] El hilo de salud se ha detenido. La conexión debe estar muerta.")
-
-        except (ConnectionRefusedError, TimeoutError):
-            print("[MONITOR] EV_Central está offline. Reintentando en 5 segundos...")
+            print("[MONITOR] Desconectado.")
         except KeyboardInterrupt:
-            print("\n[MONITOR] Apagado manual (Ctrl+C).")
             break
         except Exception as e:
-            print(f"[MONITOR] Error inesperado: {e}. Reintentando en 5 segundos...")
-        
-        time.sleep(5)
+            print(f"[MONITOR] Esperando Central... ({e})")
+            time.sleep(5)
 
 if __name__ == '__main__':
     main()

@@ -11,9 +11,11 @@ import socketserver
 import socket
 import json
 import time
+from flask import Flask, jsonify, request 
+import sqlite3 
 from kafka import KafkaProducer, KafkaConsumer
-import protocol # <-- IMPORTAMOS NUESTRO PROTOCOLO
-from EV_Central import db # <-- Usamos la importación de paquete (para -m)
+import protocol 
+from EV_Central import db 
 
 REQUESTS_TOPIC = 'requests_topic'
 TELEMETRY_TOPIC = 'telemetry_topic'
@@ -37,11 +39,19 @@ class MonitorHandler(socketserver.BaseRequestHandler): # <-- CAMBIADO a BaseRequ
             if typ == 'register':
                 location = msg_dict.get('location', 'unknown')
                 price = msg_dict.get('price', 0.0)
+                token = msg_dict.get('token') # Recibimos el token
+                
+                # --- VERIFICACIÓN DE SEGURIDAD ---
+                if not validate_token_with_registry(self.cp_id, token):
+                    print(f"[AUTH] ⛔ Acceso DENEGADO a CP {self.cp_id}. Token inválido.")
+                    # Opcional: Podríamos cerrar el socket aquí
+                    return 
+                # ---------------------------------
+
+                print(f"[AUTH] ✅ CP {self.cp_id} autenticado correctamente.")
                 
                 db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Activado')
                 self.server.register_monitor(self.cp_id, self.request, location, price)
-                
-                print(f"[REGISTER] CP {self.cp_id} @ {location}")
             
             elif typ == 'averia':
                 cp = self.server.cps.get(self.cp_id)
@@ -225,6 +235,24 @@ def kafka_consume_requests(broker, producer, central):
             central.set_state(cp_id, 'Suministrando') # Ponemos estado Suministrando
             print(f"[KAFKA] Authorized {driver_id} -> {cp_id}")
 
+def validate_token_with_registry(cp_id, token):
+    """Consulta la DB del Registry para ver si el token es válido."""
+    try:
+        # Asumimos que la DB del registry está en la carpeta raíz SD/ o en SD/EV_Registry/
+        # Ajusta la ruta '../EV_Registry/ev_registry.db' o 'ev_registry.db' según donde ejecutes
+        conn = sqlite3.connect('ev_registry.db') 
+        cur = conn.cursor()
+        cur.execute('SELECT token FROM registry WHERE id = ?', (cp_id,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if row and row[0] == token:
+            return True
+        return False
+    except Exception as e:
+        print(f"[AUTH] Error validando token: {e}")
+        return False
+
 def kafka_consume_telemetry(broker, central):
     consumer = KafkaConsumer(TELEMETRY_TOPIC, bootstrap_servers=[broker], value_deserializer=lambda m: json.loads(m.decode('utf-8')))
     print('[KAFKA] Started consumer for telemetry_topic')
@@ -308,6 +336,20 @@ def admin_console_loop(producer, central):
             cp_id = parts[1]
             central.set_state(cp_id, 'Activado')
             producer.send(CONTROL_TOPIC, {'type': 'reanudar', 'cp_id': cp_id})
+
+app_central = Flask(__name__)
+
+@app_central.route('/status', methods=['GET'])
+def get_status():
+    # Esta función permitirá al Front-end ver el estado
+    # Necesitamos acceder a la instancia del servidor 'server'
+    # Usaremos una variable global o inyección más adelante.
+    return jsonify({"status": "EV_Central Online", "mode": "Release 2"})
+
+def run_api_server():
+    # Puerto 8080 para la API de Central (diferente al 6000 del Registry)
+    app_central.run(host='0.0.0.0', port=8080)
+
 def main():
     if len(sys.argv) < 3:
         print('Usage: EV_Central <PORT_SOCKETS> <KAFKA_BROKER> [DB_PATH]')
@@ -325,6 +367,10 @@ def main():
 
     server = ThreadedTCPServer(('0.0.0.0', port), MonitorHandler, db_path)
     server.producer = producer # Adjuntamos el producer al server para que handle_averia lo use
+
+    t_api = threading.Thread(target=run_api_server, daemon=True)
+    t_api.start()
+    print(f"[API] EV_Central API listening on 0.0.0.0:8080")
 
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()

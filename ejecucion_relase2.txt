@@ -1,0 +1,14 @@
+primero registry
+python3 -m EV_Registry.main
+
+central
+python3 -m EV_Central.main 9999 localhost:9092 ev_central.db
+
+engine
+python3 -m EV_Charging_Point.engine localhost:9092 localhost:8001 CP_1
+
+monitor
+python3 -m EV_Charging_Point.monitor localhost:8001 localhost:9999 CP_1
+
+driver
+python3 -m EV_Driver.driver localhost:9092 driver_007 CP_1

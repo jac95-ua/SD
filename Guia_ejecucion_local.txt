@@ -13,19 +13,27 @@ pip install -r requirements.txt
 #abres nuevo terminal
 # en cada terminal nuevo hay que volver a activar entorno
 python3 -m EV_Central.main 9999 <IP_CENTRAL>:9092 ev_central.db
+python3 -m EV_Central.main 9999 localhost:9092 ev_central.db
+
 
 #otro terminal
 #entorno
 python3 -m EV_Charging_Point.engine <IP_PC_CENTRAL>:9092 <IP_ESTE_PC>:8001 CP_1
+python3 -m EV_Charging_Point.engine localhost:9092 localhost:8001 CP_1
+
 
 #otro
 #entorno
 
 python3 -m EV_Charging_Point.monitor <IP_ESTE_PC>:8001 <IP_CENTRAL>:9999 CP_1
+python3 -m EV_Charging_Point.monitor localhost:8001 localhost:9999 CP_1
+
 
 #ultimo terminal
 python3 -m EV_Driver.driver <IP_CENTRAL>:9092 driver_007
 python3 -m EV_Driver.driver <IP_CENTRAL>:9092 driver_007 CP_1
+python3 -m EV_Driver.driver localhost:9092 driver_007 CP_1
+
 
 al arrancar monitor volver a central para ver como imprime estado
 una vez arrancado driver deberia de empezar a suministrar y al final hacer un ticket que se vera desde driver
