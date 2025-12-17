@@ -10,7 +10,8 @@ import socket
 import time
 import json
 import threading
-import protocol # <-- IMPORTAMOS NUESTRO PROTOCOLO
+import protocol 
+import requests
 
 def parse_addr(s):
     try:
