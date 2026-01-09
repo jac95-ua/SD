@@ -1,4 +1,4 @@
-#!/home/Javi/proyectos/kafkaSD/SD/.venv/bin/python3
+#!/home/javier/Documentos/interSD/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys

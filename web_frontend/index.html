@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>EVCharging Dashboard</title>
+  <style>
+    body { font-family: sans-serif; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; }
+    .alert { background-color: #ffcccc; }
+    .ok { background-color: #ccffcc; }
+  </style>
+</head>
+<body>
+  <h1>EVCharging - Central</h1>
+
+  <h2>Charging Points</h2>
+  <table id="tblCPs">
+    <thead>
+      <tr>
+        <th>CP</th><th>Localización</th><th>Ciudad</th>
+        <th>Estado</th><th>Temp (ºC)</th><th>Clima</th>
+        <th>Registrado</th><th>Bloqueado</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Drivers</h2>
+  <table id="tblDrivers">
+    <thead>
+      <tr><th>Driver</th><th>CP</th><th>Estado</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const API = 'http://ip-central:8080/api';
+
+    async function loadCPs() {
+      const r = await fetch(API + '/status/cps');
+      const cps = await r.json();
+      const tbody = document.querySelector('#tblCPs tbody');
+      tbody.innerHTML = '';
+      cps.forEach(cp => {
+        const tr = document.createElement('tr');
+        tr.className = cp.weatherStatus === 'ALERT' ? 'alert' : 'ok';
+        tr.innerHTML = `
+          <td>${cp.cpId}</td>
+          <td>${cp.location}</td>
+          <td>${cp.city}</td>
+          <td>${cp.state}</td>
+          <td>${cp.temp ?? ''}</td>
+          <td>${cp.weatherStatus}</td>
+          <td>${cp.registered}</td>
+          <td>${cp.blocked}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function loadDrivers() {
+      const r = await fetch(API + '/status/drivers');
+      const drivers = await r.json();
+      const tbody = document.querySelector('#tblDrivers tbody');
+      tbody.innerHTML = '';
+      drivers.forEach(d => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${d.driverId}</td>
+          <td>${d.cpId ?? ''}</td>
+          <td>${d.state}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function refresh() {
+      await Promise.all([loadCPs(), loadDrivers()]);
+    }
+    setInterval(refresh, 3000);
+    refresh();
+  </script>
+</body>
+</html>
