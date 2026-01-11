@@ -5,7 +5,7 @@ import sys
 # Configuración: Alicante (Universidad)
 LAT = 38.38
 LON = -0.51
-UMBRAL_TEMPERATURA = 10.0  # Si baja de 10 grados, paramos cargas (puesto alto para probar)
+UMBRAL_TEMPERATURA = 20.0  # Si baja de 10 grados, paramos cargas (puesto alto para probar)
 INTERVALO = 5 # Segundos entre consultas
 
 def obtener_clima():
