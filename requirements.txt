@@ -2,3 +2,4 @@ kafka-python>=2.0.2
 customtkinter
 flask
 requests
+cryptography

@@ -16,6 +16,9 @@ import sqlite3
 from kafka import KafkaProducer, KafkaConsumer
 import protocol 
 from EV_Central import db 
+from EV_Central import security
+
+server_ref = None
 
 REQUESTS_TOPIC = 'requests_topic'
 TELEMETRY_TOPIC = 'telemetry_topic'
@@ -27,68 +30,108 @@ class MonitorHandler(socketserver.BaseRequestHandler): # <-- CAMBIADO a BaseRequ
     def process_message(self, msg_dict):
         """
         Procesa un diccionario de mensaje ya validado y parseado.
-        Toda la lógica de 'register', 'averia', 'ok' se mueve aquí.
+        Gestiona registro (con seguridad y clima), averías y recuperaciones.
         """
         try:
+            # 1. Identificar al CP
             cp_id_from_msg = msg_dict.get('id')
             if cp_id_from_msg:
                 self.cp_id = cp_id_from_msg
 
             typ = msg_dict.get('type')
 
+            # --- CASO 1: REGISTRO ---
             if typ == 'register':
                 location = msg_dict.get('location', 'unknown')
                 price = msg_dict.get('price', 0.0)
-                token = msg_dict.get('token') # Recibimos el token
+                token = msg_dict.get('token')
                 
-                # --- VERIFICACIÓN DE SEGURIDAD ---
+                # A) VERIFICACIÓN DE SEGURIDAD (Vía API Registry)
                 if not validate_token_with_registry(self.cp_id, token):
-                    print(f"[AUTH] ⛔ Acceso DENEGADO a CP {self.cp_id}. Token inválido.")
-                    # Opcional: Podríamos cerrar el socket aquí
-                    return 
-                # ---------------------------------
-
-                print(f"[AUTH] ✅ CP {self.cp_id} autenticado correctamente.")
+                    print(f"[AUTH] ⛔ Acceso DENEGADO a CP {self.cp_id}. Token inválido/revocado.")
+                    # ¡IMPORTANTE! Lanzamos error para que el 'handle' cierre la conexión
+                    raise ConnectionRefusedError(f"Autenticación fallida para {self.cp_id}")
                 
-                db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Activado')
-                self.server.register_monitor(self.cp_id, self.request, location, price)
+                print(f"[AUTH] ✅ CP {self.cp_id} autenticado correctamente.")
+
+                # --- NUEVO: Generar Clave Simétrica y Enviarla ---
+                # 1. Generamos clave AES 256
+                sym_key = security.generate_sym_key()
+                # 2. Guardamos en el servidor asociada a este CP
+                self.server.cp_keys[self.cp_id] = sym_key
+
+                print(f"[SEC] 🔐 Clave generada para {self.cp_id}: {sym_key[:10]}...")
+
+                # 3. Enviamos la clave al Monitor (Aún en texto plano, es el handshake)
+                response_dict = {'status': 'ok', 'sym_key': sym_key}
+                response_bytes = protocol.wrap_message(response_dict)
+                self.request.sendall(response_bytes)
+
+                # B) COMPROBACIÓN DE CLIMA (Memoria de alertas)
+                # Si la ciudad ya estaba marcada en alerta por EV_W, forzamos inicio PARADO.
+                in_alert = False
+                if hasattr(self.server, 'city_alerts'):
+                    if self.server.city_alerts.get(location.lower()):
+                        in_alert = True
+
+                if in_alert:
+                    print(f"[CLIMA] 🛑 El CP {self.cp_id} se conecta en zona de ALERTA ({location}). Iniciando PARADO.")
+                    
+                    # Guardamos estado 'Parado' en DB y memoria
+                    db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Parado')
+                    self.server.register_monitor(self.cp_id, self.request, location, price)
+                    
+                    # Enviamos orden 'parar' inmediata al Engine vía Kafka
+                    try:
+                        # Pequeña pausa para dar tiempo al Engine a suscribirse al topic
+                        time.sleep(0.5) 
+                        if hasattr(self.server, 'producer'):
+                            self.server.producer.send(CONTROL_TOPIC, {'type': 'parar', 'cp_id': self.cp_id})
+                    except Exception as e:
+                        print(f"[ERROR] No se pudo enviar parada inicial a Kafka: {e}")
+
+                else:
+                    # C) INICIO NORMAL
+                    db.save_cp(self.server.db_path, self.cp_id, location, price=price, state='Activado')
+                    self.server.register_monitor(self.cp_id, self.request, location, price)
             
+            # --- CASO 2: NOTIFICACIÓN DE AVERÍA ---
             elif typ == 'averia':
                 cp = self.server.cps.get(self.cp_id)
+                # Solo procesamos si no estaba ya averiado
                 if cp and cp.get('state') != 'Averiado':
-                    print(f"[ALERT] AVERÍA from {self.cp_id}")
+                    print(f"[ALERT] 🔧 AVERÍA reportada por {self.cp_id}")
                     self.server.handle_averia(self.cp_id)
             
+            # --- CASO 3: RECUPERACIÓN (OK) ---
             elif typ == 'ok':
                 cp = self.server.cps.get(self.cp_id)
                 if cp:
                     current_state = cp.get('state')
                     
-                    # Si el estado era de error (Averiado o Desconectado)
+                    # Solo "arreglamos" si estaba Averiado o Desconectado.
+                    # IMPORTANTE: Si está 'Parado' por clima o admin, el 'OK' del health check
+                    # NO debe reactivarlo automáticamente.
                     if current_state == 'Averiado' or current_state == 'Desconectado':
                         
-                        # 1. Marcar como Activado
                         self.server.set_state(self.cp_id, 'Activado')
+                        print(f"[RECOVERY] El monitor {self.cp_id} reporta OK. Reactivando servicio.")
                         
-                        # --- ¡LÓGICA AÑADIDA! ---
-                        # 2. Enviar comando 'reanudar' al Engine para que limpie su estado interno.
-                        print(f"[RECOVERY] El monitor {self.cp_id} reporta OK. Enviando 'reanudar' al Engine.")
+                        # Avisamos al Engine para que quite su flag de error interno
                         try:
-                            # Usamos el producer del server, que adjuntamos en main()
                             if hasattr(self.server, 'producer'):
                                 self.server.producer.send(CONTROL_TOPIC, {'type': 'reanudar', 'cp_id': self.cp_id})
                         except Exception as e:
                             print(f"[ERROR] Fallo al enviar 'reanudar' para {self.cp_id}: {e}")
 
+        except ConnectionRefusedError:
+            # Re-lanzamos esta específica para que corte la conexión en 'handle'
+            raise
         except Exception as e:
-            print(f"[PROCESS] Error procesando mensaje: {e}")
+            print(f"[PROCESS] Error procesando mensaje de {self.cp_id}: {e}")
 
     # --- MÉTODO 'handle' TOTALMENTE REESCRITO ---
-    def handle(self):
-        """
-        Lee el socket byte por byte, busca tramas <STX>...<ETX><LRC>
-        y las valida antes de procesarlas.
-        """
+def handle(self):
         self.cp_id = None
         addr = self.client_address[0]
         print(f"[SOCKET] Connection from {addr}")
@@ -97,62 +140,72 @@ class MonitorHandler(socketserver.BaseRequestHandler): # <-- CAMBIADO a BaseRequ
         message_buffer = b''
         
         try:
-            # Bucle de lectura byte a byte
             while True:
                 byte = self.request.recv(1)
                 if not byte:
-                    # Cliente desconectado
                     break
 
-                # ---- Máquina de estados del protocolo ----
                 if state == 'WAIT_STX':
                     if byte == protocol.STX:
                         state = 'IN_MESSAGE'
-                        message_buffer = b'' # Limpiamos buffer
+                        message_buffer = b'' # <--- ¡LIMPIEZA CRÍTICA!
 
                 elif state == 'IN_MESSAGE':
                     if byte == protocol.ETX:
                         state = 'WAIT_LRC'
                     else:
-                        message_buffer += byte # Acumulamos el JSON
+                        message_buffer += byte
 
                 elif state == 'WAIT_LRC':
-                    # Este 'byte' es el LRC que nos envió el monitor
                     received_lrc = byte
-                    
-                    # 1. Calcular nuestro propio LRC del mensaje
                     calculated_lrc = protocol.calculate_lrc(message_buffer)
 
-                    # 2. Validar
                     if received_lrc == calculated_lrc:
-                        # ¡CHECKSUM VÁLIDO!
                         try:
-                            msg_dict = json.loads(message_buffer.decode('utf-8'))
-                            # Enviamos el dict a procesar
+                            payload_str = message_buffer.decode('utf-8')
+                            msg_dict = None
+
+                            # --- LÓGICA INTELIGENTE DE DESCIFRADO ---
+                            # 1. ¿Tenemos clave?
+                            has_key = self.cp_id and self.server.cp_keys.get(self.cp_id)
+                            
+                            # 2. ¿Parece cifrado? (No empieza por '{')
+                            is_encrypted_format = not payload_str.strip().startswith('{')
+
+                            if has_key and is_encrypted_format:
+                                try:
+                                    # print(f"[DEBUG] Descifrando: {payload_str[:15]}...") 
+                                    decrypted_json = security.decrypt_message(payload_str, self.server.cp_keys[self.cp_id])
+                                    msg_dict = json.loads(decrypted_json)
+                                except Exception as e:
+                                    print(f"[SEC] ⚠️ Fallo al descifrar de {self.cp_id}: {e}")
+                                    raise ConnectionRefusedError("Integridad criptográfica fallida")
+                            else:
+                                # Es texto plano (Registro o mensaje sin cifrar)
+                                msg_dict = json.loads(payload_str)
+
+                            # Procesamos el mensaje
                             self.process_message(msg_dict)
+                            
+                        except ConnectionRefusedError:
+                            raise
                         except Exception as e:
-                            print(f"[PROTO] Error (JSON): {e}. Trama: {message_buffer}")
+                            print(f"[PROTO] Error lógico: {e}")
                     else:
-                        # ¡CHECKSUM INVÁLIDO!
-                        print(f"[PROTO] Error (Checksum): Recibido {received_lrc} vs Calculado {calculated_lrc}. Trama: {message_buffer}")
+                        print(f"[PROTO] Checksum Error!")
                     
-                    # 3. Volver al estado inicial y esperar la siguiente trama
+                    # Reiniciamos máquina de estados para el siguiente mensaje
                     state = 'WAIT_STX'
+                    message_buffer = b'' # <--- DOBLE SEGURIDAD
                 
-        except (socket.timeout, ConnectionResetError) as e:
-            print(f"[SOCKET] Connection error for {self.cp_id or 'unknown'}: {e}")
+        except (socket.timeout, ConnectionResetError, ConnectionRefusedError):
+            print(f"[SOCKET] Cerrando conexión con {self.cp_id or addr}")
         except Exception as e:
-            print(f"[SOCKET] Unexpected error for {self.cp_id or 'unknown'}: {e}")
-        
+            print(f"[SOCKET] Error inesperado: {e}")
         finally:
-            # Lógica de desconexión que ya teníamos
             if self.cp_id:
                 print(f"[DISCONNECT] Monitor for {self.cp_id} has disconnected.")
                 self.server.set_state(self.cp_id, 'Desconectado')
-            else:
-                print(f"[DISCONNECT] An unknown monitor (never registered) has disconnected.")
-
-
 class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
@@ -163,6 +216,8 @@ class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.cps = db.load_cps(db_path)
         self.active_supplies = {}  # cp_id -> driver_id
         self.last_telemetry = {}  # cp_id -> last telemetry dict
+        self.city_alerts = {}
+        self.cp_keys = {}
 
         print("[STATE] CPs conocidos en BBDD:")
         if not self.cps:
@@ -339,16 +394,6 @@ def admin_console_loop(producer, central):
 
 app_central = Flask(__name__)
 
-@app_central.route('/status', methods=['GET'])
-def get_status():
-    # Esta función permitirá al Front-end ver el estado
-    # Necesitamos acceder a la instancia del servidor 'server'
-    # Usaremos una variable global o inyección más adelante.
-    return jsonify({"status": "EV_Central Online", "mode": "Release 2"})
-
-def run_api_server():
-    # Puerto 8080 para la API de Central (diferente al 6000 del Registry)
-    app_central.run(host='0.0.0.0', port=8080)
 
 def main():
     if len(sys.argv) < 3:
@@ -367,6 +412,10 @@ def main():
 
     server = ThreadedTCPServer(('0.0.0.0', port), MonitorHandler, db_path)
     server.producer = producer # Adjuntamos el producer al server para que handle_averia lo use
+
+    global server_ref
+    server_ref = server
+    print("[CENTRAL] ✅ Servidor enlazado con API Rest de Clima")
 
     t_api = threading.Thread(target=run_api_server, daemon=True)
     t_api.start()
@@ -407,29 +456,61 @@ app = Flask(__name__)
 
 @app.route('/api/weather', methods=['POST'])
 def receive_weather_alert():
+    global server_ref
+    if not server_ref:
+        return jsonify({"status": "error", "message": "Central no lista"}), 503
+
     data = request.json
-    accion = data.get('action')
+    city_target = data.get('city')       # Ahora recibimos la ciudad
+    accion = data.get('action')          # ALERT o RECOVER
     temp = data.get('temperature')
+
+    if city_target:
+        server_ref.city_alerts[city_target.lower()] = (accion == "ALERT")
     
-    print(f"\n[REST-API] 📨 Mensaje de EV_W recibido: {accion} ({temp}ºC)")
+    print(f"\n[REST-API] 📨 Alerta de Clima para {city_target}: {accion} ({temp}ºC)")
     
-    if accion == "STOP_ALL":
-        print("🛑 [CENTRAL] ¡ORDEN DE PARADA DE EMERGENCIA POR CLIMA!")
-        # AQUÍ AÑADIREMOS LA LÓGICA PARA PARAR LOS KAFKA PRODUCERS
-        # TODO: Iterar sobre CPs conectados y mandar STOP
-        
-    elif accion == "RESUME_ALL":
-        print("▶️ [CENTRAL] Reanudando operaciones normales.")
-    
-    return jsonify({"status": "ok", "message": "Alerta recibida"}), 200
+    affected_count = 0
+
+    # Iteramos sobre todos los CPs registrados en el servidor
+    # server_ref.cps es un diccionario { 'CP_1': {'location': 'Alicante', ...}, ... }
+    for cp_id, cp_data in server_ref.cps.items():
+        # Comparamos la ubicación (ignorando mayúsculas/minúsculas)
+        cp_location = cp_data.get('location', '').lower()
+        if cp_location == city_target.lower():
+            
+            affected_count += 1
+            
+            if accion == "ALERT":
+                # Lógica idéntica a "parar" de la consola admin
+                if cp_data.get('state') != 'Parado':
+                    print(f"   ⛔ Parando {cp_id} por clima extremo...")
+                    server_ref.set_state(cp_id, 'Parado')
+                    try:
+                        server_ref.producer.send(CONTROL_TOPIC, {'type': 'parar', 'cp_id': cp_id})
+                    except Exception as e:
+                        print(f"   [ERROR] Kafka: {e}")
+
+            elif accion == "RECOVER":
+                # Lógica idéntica a "reanudar"
+                # Solo reanudamos si estaba Parado (no si está Averiado por otra causa)
+                if cp_data.get('state') == 'Parado':
+                    print(f"   ▶️  Reanudando {cp_id}...")
+                    server_ref.set_state(cp_id, 'Activado')
+                    try:
+                        server_ref.producer.send(CONTROL_TOPIC, {'type': 'reanudar', 'cp_id': cp_id})
+                    except Exception as e:
+                        print(f"   [ERROR] Kafka: {e}")
+
+    if affected_count == 0:
+        return jsonify({"status": "warning", "message": f"No hay CPs en {city_target}"}), 200
+
+    return jsonify({"status": "ok", "processed": affected_count}), 200
 
 def run_api_server():
-    # Ejecuta Flask en un hilo aparte en puerto 9000
-    app.run(port=9000, debug=False, use_reloader=False)
+    
+    app.run(host='0.0.0.0', port=9001, debug=False, use_reloader=False)
 
 if __name__ == '__main__':
-    print("🌐 Iniciando servidor REST en http://localhost:9000 (para clima y web)...")
-    api_thread = threading.Thread(target=run_api_server)
-    api_thread.daemon = True # Esto hace que se cierre si cierras el programa principal
-    api_thread.start()
+
     main()

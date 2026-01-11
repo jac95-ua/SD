@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:5000/api";
+const API_URL = 'http://localhost:9001/api/status'; // (O similar)
 
 async function loadCPs() {
   const r = await fetch(`${API_BASE}/status/cps`);

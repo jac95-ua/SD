@@ -4,6 +4,7 @@ EV_Registry: API REST para el registro de Puntos de Carga.
 Expone endpoints para dar de alta CPs y obtener credenciales.
 """
 import sys
+import sqlite3 
 from flask import Flask, request, jsonify
 from EV_Registry import db
 
@@ -40,9 +41,36 @@ def register():
         'message': 'CP registrado correctamente. Usa este token para autenticarte en la Central.'
     }), 200
 
+@app.route('/validate', methods=['POST'])
+def validate_token():
+    """
+    Endpoint interno para que EV_Central verifique credenciales.
+    Recibe: { "id": "CP_1", "token": "..." }
+    Retorna: { "valid": True/False }
+    """
+    data = request.get_json()
+    cp_id = data.get('id')
+    token_candidate = data.get('token')
+    
+    # Consultamos la DB local de Registry
+    # Nota: Idealmente esto iría en db.py, pero lo hacemos aquí por rapidez
+    try:
+        conn = sqlite3.connect('ev_registry.db')
+        cur = conn.cursor()
+        cur.execute('SELECT token FROM registry WHERE id = ?', (cp_id,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if row and row[0] == token_candidate:
+            return jsonify({"valid": True}), 200
+        else:
+            return jsonify({"valid": False}), 200 # Respondemos 200 OK pero con valid: False
+            
+    except Exception as e:
+        print(f"[ERROR] Validando token: {e}")
+        return jsonify({"valid": False, "error": str(e)}), 500
+
 if __name__ == '__main__':
-    # El Registry correrá en el puerto 6000 para no chocar con otros
-    # En producción usaríamos ssl_context='adhoc' para HTTPS, 
-    # pero para desarrollo empezamos con HTTP simple.
+
     print("[REGISTRY] Servidor de Registro escuchando en puerto 6000...")
     app.run(host='0.0.0.0', port=6000, debug=True)
