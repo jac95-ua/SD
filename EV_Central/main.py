@@ -402,5 +402,34 @@ def main():
             print('Shutting down...')
             server.shutdown()
 
+
+app = Flask(__name__)
+
+@app.route('/api/weather', methods=['POST'])
+def receive_weather_alert():
+    data = request.json
+    accion = data.get('action')
+    temp = data.get('temperature')
+    
+    print(f"\n[REST-API] 📨 Mensaje de EV_W recibido: {accion} ({temp}ºC)")
+    
+    if accion == "STOP_ALL":
+        print("🛑 [CENTRAL] ¡ORDEN DE PARADA DE EMERGENCIA POR CLIMA!")
+        # AQUÍ AÑADIREMOS LA LÓGICA PARA PARAR LOS KAFKA PRODUCERS
+        # TODO: Iterar sobre CPs conectados y mandar STOP
+        
+    elif accion == "RESUME_ALL":
+        print("▶️ [CENTRAL] Reanudando operaciones normales.")
+    
+    return jsonify({"status": "ok", "message": "Alerta recibida"}), 200
+
+def run_api_server():
+    # Ejecuta Flask en un hilo aparte en puerto 9000
+    app.run(port=9000, debug=False, use_reloader=False)
+
 if __name__ == '__main__':
+    print("🌐 Iniciando servidor REST en http://localhost:9000 (para clima y web)...")
+    api_thread = threading.Thread(target=run_api_server)
+    api_thread.daemon = True # Esto hace que se cierre si cierras el programa principal
+    api_thread.start()
     main()
